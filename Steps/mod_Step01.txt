@@ -1,0 +1,296 @@
+
+'---------------------------------------------------------------
+' STEP 01 : CLEAN RAW HTML
+'---------------------------------------------------------------
+Public Sub Step01_CleanRawHTML(srcRng As Range, tgtRng As Range)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(TEST_SHEET)
+    Dim tgtCol As Long: tgtCol = tgtRng.Column
+    Dim srcCol As Long: srcCol = srcRng.Column
+
+    Dim iRow As Long
+    For iRow = CORE_ROWS_START + 1 To CORE_ROWS_END Step ROWS_TO_SKIP
+        If A6_SkipRow(iRow) Then
+            ws.Cells(iRow, tgtCol).Value = zNz(ws.Cells(iRow, srcCol).Value)
+        Else
+            Dim html As String: html = zNz(ws.Cells(iRow, srcCol).Value)
+
+            'call helper routines
+                html = Step01a_CleanUnicode(html)
+                html = Step01b_FixBrokenQuotes(html)
+                html = Step01c_FixSelfClosingTags(html)
+                html = Step01d_FlattenLineBreaks(html)
+                html = Step01e_RemoveInvisibleChars(html)
+                html = Step01f_RemoveHtmlHeadBodyWrappers(html)
+
+            ws.Cells(iRow, tgtCol).Value = html
+        End If
+    Next iRow
+End Sub
+
+
+
+
+
+
+'WILL BECOME FUTURE STEP 14 OR 15 ... ???
+Public Function Step14a_BeautifyHTML(raw As String) As String
+    Dim regex As Object: Set regex = CreateObject("VBScript.RegExp")
+    Dim matches As Object, match As Object
+    Dim result As String, level As Long
+    
+    ' Match tags (opening, closing, comments, self-closing, and text)
+    With regex
+        .Global = True
+        .MultiLine = True
+        .IgnoreCase = True
+        .pattern = "(<!--[\s\S]*?-->)|(<[^>]+>)|([^<>]+)"
+    End With
+
+    Set matches = regex.Execute(raw)
+
+    For Each match In matches
+        Dim line As String: line = Trim(match.Value)
+        If Len(line) = 0 Then GoTo Skip
+
+        If Left(line, 2) = "</" Then
+            level = level - 1
+            If level < 0 Then level = 0
+        End If
+
+        result = result & Space(level * 2) & line & vbCrLf
+
+        If line Like "<*" And Not line Like "</*>" And _
+           Not Right(line, 2) = "/>" And InStr(line, "</") = 0 And _
+           Not line Like "<!--*" Then
+            level = level + 1
+        End If
+
+Skip:
+    Next match
+
+    Step14a_BeautifyHTML = Trim(result)
+End Function
+
+
+
+'---------------------------------------------------------------
+' STEP 01a : CLEAN UNICODE WEIRD CHARACTERS
+'---------------------------------------------------------------
+Public Function Step01a_CleanUnicode(html As String) As String
+    If Len(html) = 0 Then
+        Step01a_CleanUnicode = ""
+        Exit Function
+    End If
+
+    ' Replace smart quotes, fancy apostrophes, en/em dashes, etc
+    html = Replace(html, ChrW(&H201C), """") ' Left smart quote
+    html = Replace(html, ChrW(&H201D), """") ' Right smart quote
+    html = Replace(html, ChrW(&H2018), "'")  ' Left single quote
+    html = Replace(html, ChrW(&H2019), "'")  ' Right single quote
+    html = Replace(html, ChrW(&H2014), "-")  ' Em dash
+    html = Replace(html, ChrW(&H2013), "-")  ' En dash
+
+    ' Remove invisible BOM marker if present
+    If Left(html, 1) = ChrW(&HFEFF) Then html = Mid(html, 2)
+
+    Step01a_CleanUnicode = html
+End Function
+
+
+
+'---------------------------------------------------------------
+' STEP 01b : FIX BROKEN OR EXTRA DOUBLE QUOTES
+'---------------------------------------------------------------
+Public Function Step01b_FixBrokenQuotes(html As String) As String
+    Dim regex As Object
+    Set regex = CreateObject("VBScript.RegExp")
+
+    ' Step 1: Collapse multiple double double-quotes ("") into single (")
+    html = Replace(html, """""", """")
+
+    ' Step 2: Remove double quotes immediately after = (e.g., =""something)
+    Set regex = CreateObject("VBScript.RegExp")
+    With regex
+        .Global = True
+        .IgnoreCase = True
+        .MultiLine = True
+        .pattern = "=\s*""""+([^""]*?)""""+"
+    End With
+    html = regex.Replace(html, "=""$1""")
+
+    ' Step 3: Remove orphaned quotes outside of tags (optional safety, comment out if not needed)
+    ' Not doing anything destructive here to avoid messing text content.
+
+    Step01b_FixBrokenQuotes = html
+End Function
+
+
+
+'---------------------------------------------------------------
+' STEP 01c : FIX MISSING SELF-CLOSING TAGS
+'---------------------------------------------------------------
+Public Function Step01c_FixSelfClosingTags(html As String) As String
+    Dim tag As Variant
+    Dim tagsToFix As Variant
+    tagsToFix = Array("meta", "link", "input", "br", "hr", "img")
+
+    For Each tag In tagsToFix
+        Dim regex As Object: Set regex = CreateObject("VBScript.RegExp")
+        With regex
+            .Global = True
+            .IgnoreCase = True
+            .MultiLine = True
+            ' Match <tag ...> not already ending in />
+            .pattern = "<\s*" & tag & "\b[^>]*?(?<!/)>"
+        End With
+
+        Dim matches As Object, m As Object
+        On Error Resume Next
+        Set matches = regex.Execute(html)
+        On Error GoTo 0
+
+        If Not matches Is Nothing Then
+            For Each m In matches
+                html = Replace(html, m.Value, Step01c1_FixSelfClose(m.Value))
+            Next m
+        End If
+    Next tag
+
+    Step01c_FixSelfClosingTags = html
+End Function
+
+
+
+'---------------------------------------------------------------
+' SUB-STEP 01c1 : SUB-HELPER #1 FOR 01c - FIX SINGLE SELF-CLOSING TAG
+'---------------------------------------------------------------
+Private Function Step01c1_FixSelfClose(tagHtml As String) As String
+    If Right(tagHtml, 2) = "/>" Then
+        Step01c1_FixSelfClose = tagHtml
+    Else
+        Step01c1_FixSelfClose = Left(tagHtml, Len(tagHtml) - 1) & " />"
+    End If
+End Function
+
+
+
+'---------------------------------------------------------------
+' STEP 01d : FLATTEN MULTILINE HTML / CRLFs
+'---------------------------------------------------------------
+Public Function Step01d_FlattenLineBreaks(html As String) As String
+    If Len(html) = 0 Then
+        Step01d_FlattenLineBreaks = ""
+        Exit Function
+    End If
+
+    html = Replace(html, vbCrLf, " ")
+    html = Replace(html, vbCr, " ")
+    html = Replace(html, vbLf, " ")
+    html = Replace(html, vbTab, " ")
+
+    ' Collapse multiple spaces
+    html = Application.WorksheetFunction.Trim(html)
+
+    Step01d_FlattenLineBreaks = html
+End Function
+
+
+
+'---------------------------------------------------------------
+' STEP 01e : REMOVE INVISIBLE CHARACTERS (BUT KEEP UNICODE SYMBOLS)
+'---------------------------------------------------------------
+Public Function Step01e_RemoveInvisibleChars(ByVal html As String) As String
+    Dim i As Long, out As String, ch As String
+    Dim code As Long
+    
+    For i = 1 To Len(html)
+        ch = Mid$(html, i, 1)
+        code = AscW(ch)
+        
+        Select Case code
+            Case 9, 10, 13
+                out = out & " " ' Replace tabs, line breaks with space
+            Case 32 To 126
+                out = out & ch ' Normal ASCII printable
+            Case 160
+                out = out & " " ' Non-breaking space to normal space
+            Case 8211 To 8287
+                out = out & ch ' Dashes, quotes, and common punctuation
+            Case 8592 To 10175
+                out = out & ch ' Arrows, symbols, miscellaneous unicode
+            Case 0 To 8, 11, 12, 14 To 31
+                ' Control characters — remove
+            Case Else
+                out = out & ch ' Keep all other visible Unicode
+        End Select
+    Next i
+    
+    Step01e_RemoveInvisibleChars = out
+End Function
+
+
+
+
+'---------------------------------------------------------------
+' STEP 01f : Remove HTML, HEAD, BODY tags (Wrappers Only)
+'---------------------------------------------------------------
+Public Function Step01f_RemoveHtmlHeadBodyWrappers(html As String) As String
+    Dim tag As String
+    Dim tags As Variant: tags = Split("html head body")
+    Dim i As Long
+    
+    tags = Array("html", "head", "body")
+    
+    For i = LBound(tags) To UBound(tags)
+        tag = tags(i)
+        
+        ' Remove opening tag with any attributes
+        html = Step01f1_ReplaceTagOpening(html, tag)
+        
+        ' Remove closing tag
+        html = Step01f2_ReplaceTagClosing(html, tag)
+    Next i
+    
+    Step01f_RemoveHtmlHeadBodyWrappers = html
+End Function
+
+
+
+'---------------------------------------------------------------
+' SUB-STEP 01f1 : SUB-HELPER #1 FOR 01f - REMOVE OPENING TAG WITH ANY ATTRIBUTES
+'---------------------------------------------------------------
+Private Function Step01f1_ReplaceTagOpening(html As String, tag As String) As String
+    Dim regex As Object
+    Set regex = CreateObject("VBScript.RegExp")
+    
+    With regex
+        .Global = True
+        .IgnoreCase = True
+        .pattern = "<\s*" & tag & "\b[^>]*?>"
+    End With
+    
+    Step01f1_ReplaceTagOpening = regex.Replace(html, "")
+End Function
+
+
+
+'---------------------------------------------------------------
+' SUB-STEP 01f2 : SUB-HELPER #2 FOR 01f - REMOVE CLOSING TAG WITH ANY ATTRIBUTES
+'---------------------------------------------------------------
+Private Function Step01f2_ReplaceTagClosing(html As String, tag As String) As String
+    Dim regex As Object
+    Set regex = CreateObject("VBScript.RegExp")
+    
+    With regex
+        .Global = True
+        .IgnoreCase = True
+        .pattern = "<\s*/\s*" & tag & "\s*>"
+    End With
+    
+    Step01f2_ReplaceTagClosing = regex.Replace(html, "")
+End Function
+
+
+
+
+
